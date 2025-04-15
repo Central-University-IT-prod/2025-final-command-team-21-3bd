@@ -1,0 +1,33 @@
+@using Blazored.LocalStorage
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@inject NavigationManager Navigation
+@inject ILocalStorageService LocalStorage
+@inherits LayoutComponentBase
+
+<div class="page">
+    <main>
+        <div class="top-row px-4">
+            <button @onclick="ExitFromAcc">Выйти из системы</button>
+        </div>
+    </main>
+</div>
+
+@code {
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        var id = await LocalStorage.GetItemAsStringAsync("adminId");
+        if (string.IsNullOrEmpty(id))
+        {
+            Navigation.NavigateTo("/auth");
+            StateHasChanged();
+        }
+    }
+    
+    private async Task ExitFromAcc()
+    {
+        await LocalStorage.SetItemAsStringAsync("adminId", "");
+        Navigation.NavigateTo("/auth");
+        StateHasChanged();
+    }
+}

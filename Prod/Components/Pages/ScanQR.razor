@@ -1,0 +1,510 @@
+@page "/scan-qr"
+@using Prod.Exceptions
+@using Prod.Models.Database
+@using Prod.Services
+@inherits AuthComponentBase
+@inject IBookService BookService
+@inject IQrCodeService QrService
+@inject IUserService UserService
+@inject IJSRuntime JsRuntime
+@rendermode InteractiveServer
+
+<h3>Сканировать QR</h3>
+
+@if (!string.IsNullOrEmpty(_errorMessage))
+{
+    <div class="alert alert-danger">@_errorMessage</div>
+}
+
+@if (_book != null && _user != null)
+{
+    if (_user.Role is Role.ADMIN or Role.INTERNAL)
+    {
+        if (_user.Role is Role.ADMIN or Role.INTERNAL)
+        {
+            if (!_isChangeStatusCalled)
+            {
+                ChangeStatusToActive().GetAwaiter().GetResult();
+                _isChangeStatusCalled = true;
+            }
+
+            <div class="modal" style="display: block;">
+                <div class="modal-content">
+                    <span class="close" @onclick="CloseModal">&times;</span>
+                    <h4>Успех!</h4>
+                </div>
+            </div>
+        }
+    }
+    else
+    {
+        <div class="modal" style="display: block;">
+            <div class="modal-content">
+                <span class="close" @onclick="CloseModal">&times;</span>
+                <h4>Информация о бронировании</h4>
+                <p>Тип: @GetGroupName(_book.GetType().Name)</p>
+                <p>Описание: @_book.Description</p>
+                <p>Дата начала: @_book.Start</p>
+                <p>Дата окончания: @_book.End</p>
+                <p>Статус: @_book.Status</p>
+                
+                @switch (_state)
+                {
+                    case QrVerState.ShowUserPhoto:
+                        if (_user.VerificationPhoto is null)
+                        {
+                            _state = QrVerState.TakeNewPhoto;
+                            StateHasChanged();
+                        }
+                        else
+                        {
+                            <div class="passport-info">
+                                <h4>Паспортные данные</h4>
+                                <div class="passport-header">
+                                    <img src="@_user.VerificationPhoto?.ToString()" alt="Avatar" class="passport-avatar"/>
+                                    <div class="passport-details">
+                                        <p>Фамилия: ***</p>
+                                        <p>Имя: ***</p>
+                                        <p>Отчество: ***</p>
+                                    </div>
+                                </div>
+                                <div class="passport-details">
+                                    <p>Серия: ***</p>
+                                    <p>Номер: ***</p>
+                                </div>
+                            </div>
+                            <button @onclick="ChangeStatusToActive" class="confirm-button">Подтвердить</button>
+                            <button @onclick="DiscardRequest" class="discard-button">Отклонить</button>
+                        }
+
+                        break;
+                    case QrVerState.ShowUserPassportData:
+                        if (_user.Passport is null)
+                        {
+                            _state = QrVerState.InputPassportData;
+                            StateHasChanged();
+                        }
+                        else
+                        {
+                            <div class="passport-info">
+                                <h4>Паспортные данные</h4>
+                                <div class="passport-header">
+                                    <img src="@_user.VerificationPhoto?.ToString()" alt="Avatar" class="passport-avatar"/>
+                                    <div class="passport-details">
+                                        <p>Фамилия: @_user.Passport.Lastname</p>
+                                        <p>Имя: @_user.Passport.Firstname</p>
+                                        <p>Отчество: @_user.Passport.Middlename</p>
+                                    </div>
+                                </div>
+                                <div class="passport-details">
+                                    <p>Серия: @_user.Passport.Serial</p>
+                                    <p>Номер: @_user.Passport.Number</p>
+                                </div>
+                            </div>
+                            <button @onclick="ChangeStatusToActive" class="confirm-button">Подтвердить</button>
+                            <button @onclick="() => _state = QrVerState.TakeNewPhoto" class="confirm-button">Заменить фото</button>
+                            <button @onclick="DiscardRequest" class="discard-button">Отклонить</button>
+                        }
+
+                        break;
+                    case QrVerState.InputPassportData:
+                        <EditForm Model="@_passport" OnValidSubmit="SetNewPassportData" style="display: block;" FormName="PassportForm">
+                            <DataAnnotationsValidator/>
+                            <ValidationSummary/>
+                            <div>
+                                <label>Серия</label>
+                                <InputText @bind-Value="_passport.Serial" class="form-control"/>
+                            </div>
+                            <div>
+                                <label>Номер</label>
+                                <InputText @bind-Value="_passport.Number" class="form-control"/>
+                            </div>
+                            <div>
+                                <label>Имя</label>
+                                <InputText @bind-Value="_passport.Firstname" class="form-control"/>
+                            </div>
+                            <div>
+                                <label>Фамилия</label>
+                                <InputText @bind-Value="_passport.Lastname" class="form-control"/>
+                            </div>
+                            <div>
+                                <label>Отчество</label>
+                                <InputText @bind-Value="_passport.Middlename" class="form-control"/>
+                            </div>
+                            <div>
+                                <label>Дата рождения</label>
+                                <InputText @bind-Value="_passport.Birthday" type="date" class="form-control"/>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Подтвердить</button>
+                        </EditForm>
+                        break;
+                    case QrVerState.TakeNewPhoto:
+                        <div>
+                            <label for="fileInput">Загрузите фотографию:</label>
+                            <InputFile class="file-input" id="fileInput" OnChange="OnFileChange" accept="image/*" />
+                        </div>
+                        <button @onclick="UploadPhoto" class="confirm-button">Загрузить</button>
+                        break;
+                }
+            </div>
+        </div>
+    }
+}
+
+<div class="manual-input">
+    <label for="qrCodeInput">Введите QR код вручную или сканируйте его:</label>
+    <div class="qr-code-inputs" @onmouseover="ActivateInput" @onmouseout="DeactivateInput">
+        @for (int i = 0; i < 10; i++)
+        {
+            <span class="qr-code-digit">@(_manualQrCode[i] == '\0' ? "_" : _manualQrCode[i].ToString())</span>
+        }
+    </div>
+    <input type="text" id="hiddenInput" @bind="_manualQrCodeString" @oninput="HandleInput" maxlength="10" class="hidden-input" />
+    <button @onclick="ProcessManualQrCode" class="process-button">Обработать</button>
+</div>
+
+@code {
+
+    enum QrVerState
+    {
+        Start,
+        ShowUserPhoto,
+        ShowUserPassportData,
+        TakeNewPhoto,
+        InputPassportData,
+    }
+    
+    private Book? _book;
+    private User? _user;
+    private string? _errorMessage;
+    private char[] _manualQrCode = new char[10];
+    private string _manualQrCodeString = string.Empty;
+    private string? _qrCode;
+    private QrVerState _state = QrVerState.Start;
+    private IBrowserFile? _selectedFile;
+    private PassportCreateRequest _passport = new();
+    private bool _isChangeStatusCalled;
+
+    private void OnFileChange(InputFileChangeEventArgs e)
+    {
+        _selectedFile = e.File;
+    }
+    
+    private async Task UploadPhoto()
+    {
+        if (_selectedFile == null)
+        {
+            _errorMessage = "Файл не выбран.";
+            return;
+        }
+
+        try
+        {
+            await using var stream = _selectedFile.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024);
+            var fileName = _selectedFile.Name;
+            
+            await UserService.SetVerificationPhoto(stream, fileName, _user!.Id);
+            await ReturnBarcodeResultsAsync(_qrCode!);
+            
+            _state = _user!.Passport is null ? QrVerState.InputPassportData : QrVerState.ShowUserPhoto;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Ошибка при загрузке файла: {ex.Message}";
+        }
+    }
+    
+    private string GetGroupName(string typeName) => typeName switch
+    {
+        nameof(OpenBook) => "Опенспейс",
+        nameof(OfficeBook) => "Места в офисе",
+        nameof(TalkroomBook) => "Комнаты",
+        _ => "Остальное"
+    };
+    
+    private void CloseModal()
+    {
+        _book = null;
+        _manualQrCode = new char[10];
+        _state = QrVerState.Start;
+        _isChangeStatusCalled = false;
+        _passport = new();
+        StateHasChanged();
+    }
+
+    private async Task SetNewPassportData()
+    {
+        if (_state == QrVerState.InputPassportData)
+        {
+            await UserService.SetPassport(_user!.Id, _passport);
+            await ReturnBarcodeResultsAsync(_qrCode!);
+        }
+
+        await ChangeStatusToActive();
+    }
+
+    private async Task ReturnBarcodeResultsAsync(string qrCode)
+    {
+        try
+        {
+            await JsRuntime.InvokeVoidAsync("logToConsole", $"QR: {_qrCode}", "info");
+            _qrCode = qrCode;
+            var id = QrService[long.Parse(qrCode)];
+            
+            await JsRuntime.InvokeVoidAsync("logToConsole", $"ID: {id?.ToString()}", "info");
+
+            if (id is not null)
+            {
+                _book = await BookService.GetBookById(id.Value);
+                _user = _book?.User;
+                _state = QrVerState.ShowUserPhoto;
+                await JsRuntime.InvokeVoidAsync("logToConsole", $"Success User ID: {_user?.Id.ToString()}", "info");
+                if (_book is null)
+                    throw new Exception("Бронирование уже не существует");
+            }
+            else
+                throw new Exception("Неверный код");
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Ошибка: {ex.Message}";
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task ProcessManualQrCode()
+    {
+        var qrCode = new string(_manualQrCode);
+        if (!string.IsNullOrEmpty(qrCode))
+            await ReturnBarcodeResultsAsync(qrCode);
+        else
+            _errorMessage = "Введите код целиком";
+    }
+
+    private void HandleInput(ChangeEventArgs e)
+    {
+        var input = e.Value?.ToString() ?? string.Empty;
+        input = new string(input.Where(char.IsAsciiDigit).ToArray());
+        
+        if (input.Length > 10)
+        {
+            input = input.Substring(0, 10);
+        }
+        
+        Array.Clear(_manualQrCode, 0, _manualQrCode.Length);
+        
+        for (int i = 0; i < input.Length; i++)
+        {
+            _manualQrCode[i] = input[i];
+        }
+
+        _manualQrCodeString = input;
+    }
+    
+    private void ActivateInput()
+    {
+        JsRuntime.InvokeVoidAsync("activateInput", "hiddenInput");
+    }
+
+    private void DeactivateInput()
+    {
+        JsRuntime.InvokeVoidAsync("deactivateInput", "hiddenInput");
+    }
+
+    private async Task ChangeStatusToActive()
+    {
+        try
+        {
+            await BookService.ConfirmQr(new ConfirmQrRequest() { Code = _qrCode ?? "" });
+            if (_book != null)
+            {
+                _book.Status = Status.Active;
+            }
+
+            StateHasChanged();
+        }
+        catch (ForbiddenException)
+        {
+            _errorMessage = $"Неверный QR код";
+        }
+    }
+
+    private void DiscardRequest()
+    {
+        switch (_state)
+        {
+            case QrVerState.ShowUserPhoto:
+                _state = QrVerState.ShowUserPassportData;
+                break;
+            case QrVerState.ShowUserPassportData:
+                CloseModal();
+                break;
+        }
+        
+        StateHasChanged();
+    }
+}
+
+<style>
+    body {
+        font-family: Arial, sans-serif;
+    }
+
+    h3 {
+        text-align: center;
+        margin-top: 20px;
+    }
+
+    .alert {
+        color: red;
+        text-align: center;
+        margin-top: 20px;
+    }
+
+    .passport-info,
+    .manual-input {
+        border: 1px solid #888;
+        padding: 20px;
+        margin-top: 20px;
+        background-color: #f9f9f9;
+        border-radius: 10px;
+        max-width: 800px;
+        margin-left: auto;
+        margin-right: auto;
+    }
+
+    .passport-header,
+    .qr-code-inputs {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin-bottom: 20px;
+    }
+
+    .passport-avatar {
+        max-width: 100px;
+        border-radius: 20% / 50%;
+        margin-right: 20px;
+    }
+
+    .passport-details p {
+        margin: 5px 0;
+    }
+
+    .qr-code-inputs input {
+        text-align: center;
+        font-size: 24px;
+        width: 50px;
+        height: 50px;
+        margin: 0 5px;
+    }
+
+    .process-button,
+    .confirm-button {
+        display: block;
+        margin: 0 auto;
+        padding: 10px 20px;
+        font-size: 16px;
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background-color 0.3s ease;
+    }
+    .discard-button {
+        display: block;
+        margin: 0 auto;
+        padding: 10px 20px;
+        font-size: 16px;
+        background-color: #e00909;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background-color 0.3s ease;
+    }
+
+    .process-button:hover,
+    .confirm-button:hover {
+        background-color: #45a049;
+    }
+
+    .hidden-input {
+        position: absolute;
+        opacity: 0;
+        height: 0;
+        width: 0;
+        border: none;
+        outline: none;
+    }
+
+    .qr-code-inputs {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin-bottom: 20px;
+        border: 1px solid #ccc;
+        padding: 10px;
+        border-radius: 5px;
+        background-color: #f9f9f9;
+        cursor: text;
+    }
+
+    .qr-code-digit {
+        font-size: 24px;
+        width: 30px;
+        text-align: center;
+        margin: 0 5px;
+        border-bottom: 2px solid #000;
+    }
+
+    .manual-input {
+        position: relative;
+    }
+
+    .file-input {
+        margin-top: 20px;
+    }
+
+    .file-input label {
+        display: block;
+        margin-bottom: 10px;
+        font-weight: bold;
+    }
+
+    .file-input input[type="file"] {
+        display: block;
+        margin-bottom: 20px;
+    }
+</style>
+
+<script>
+    function logToConsole(message, level = 'info') {
+        switch (level) {
+            case 'info':
+                console.info(message);
+                break;
+            case 'warn':
+                console.warn(message);
+                break;
+            case 'error':
+                console.error(message);
+                break;
+            default:
+                console.log(message);
+        }
+    }
+
+    function activateInput(elementId) {
+        const input = document.getElementById(elementId);
+        input.focus();
+    }
+
+    function deactivateInput(elementId) {
+        const input = document.getElementById(elementId);
+        input.blur();
+    }
+</script>
